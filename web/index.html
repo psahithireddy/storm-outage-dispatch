@@ -137,10 +137,13 @@
   }).addTo(map);
   const lats = D.zones.map(z => z.lat), lons = D.zones.map(z => z.lon);
   const bounds = [[Math.min(...lats) - 0.02, Math.min(...lons) - 0.02], [Math.max(...lats) + 0.02, Math.max(...lons) + 0.02]];
-  const fit = () => { map.invalidateSize(); map.fitBounds(bounds); };
+  // refit whenever the map's size changes, until the visitor starts moving the map themselves
+  let touched = false;
+  ["mousedown", "touchstart", "wheel"].forEach(ev => $("map").addEventListener(ev, () => { touched = true; }, { passive: true }));
+  const fit = () => { if (touched) return; map.invalidateSize(); map.fitBounds(bounds); };
   fit();
   window.addEventListener("load", fit);
-  window.addEventListener("resize", fit);
+  new ResizeObserver(fit).observe($("map"));
 
   D.lines.forEach(pl => L.polyline(pl, { color: "#6b7280", weight: 1.2, opacity: 0.55 }).addTo(map));
   D.substations.forEach(s => L.circleMarker(s, { radius: 2, color: "#374151", weight: 1, fillOpacity: 0.9 }).addTo(map));
