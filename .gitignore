@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.claude/
+# pitch deck material (contains personal contact details)
+TISC_pitch_deck.pptx
+build_deck.py
+deck_figs/

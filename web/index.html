@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storm Outage Dispatch</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #14213d; --muted: #5b6577; --line: #e2e6ec;
+    --accent: #1d4ed8; --warn: #b91c1c; --good: #15803d;
+    --c-fifo: #8a94a6; --c-nearest: #d97706; --c-priority: #1d4ed8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1623; --panel: #17202f; --ink: #e8edf5; --muted: #98a3b5; --line: #2a3547;
+      --accent: #6ea0ff; --warn: #f87171; --good: #4ade80;
+      --c-fifo: #8a94a6; --c-nearest: #f5a524; --c-priority: #6ea0ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
+  header { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 17px; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+  main { flex: 1; display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
+  #map { min-height: 360px; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); padding: 14px 16px; overflow-y: auto; }
+  aside h2 { margin: 16px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  aside h2:first-child { margin-top: 0; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  label { font-size: 13px; color: var(--muted); }
+  select { background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 5px 4px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td .sd { color: var(--muted); font-size: 11.5px; }
+  tr.best td { font-weight: 700; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  .banner { background: color-mix(in srgb, var(--warn) 10%, var(--panel)); border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line)); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; margin-bottom: 12px; }
+  svg text { fill: var(--muted); font-size: 10.5px; }
+  .chart { width: 100%; height: auto; display: block; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 5px; }
+  footer { background: var(--panel); border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  footer input[type=range] { flex: 1; min-width: 180px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer; }
+  #clock { font-weight: 600; min-width: 150px; }
+  .stat { color: var(--muted); font-size: 13px; }
+  .stat b { color: var(--ink); }
+  .scale { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .scale .bar { height: 8px; width: 110px; border-radius: 4px; background: linear-gradient(90deg, #fde68a, #f59e0b, #b91c1c); }
+  .fault-pin { width: 14px; height: 14px; border-radius: 50%; background: #dc2626; border: 2px solid #fff; box-shadow: 0 0 0 2px rgba(220,38,38,.4); }
+  .fault-pin.crit { background: #7c3aed; box-shadow: 0 0 0 2px rgba(124,58,237,.45); }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    #map { height: 55vh; }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Storm outage prediction &amp; crew dispatch</h1>
+  <p>Hyderabad region · replay of 31 Aug – 2 Sep 2024 monsoon spell · real weather and power-network geography, synthetic faults</p>
+</header>
+<main>
+  <div id="map"></div>
+  <aside>
+    <div class="banner"><b>Read with care.</b> Weather and map assets are real. Faults, customer counts and repair times are simulated assumptions, not DISCOM records.</div>
+
+    <h2>Scenario</h2>
+    <div class="row">
+      <label>Crews available <select id="crews"></select></label>
+      <label>Show faults under <select id="strategy"></select></label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label>Crew positioning <select id="mode">
+        <option value="depot">Stay where last repair ended</option>
+        <option value="prepos">Pre-position idle crews (forecast)</option>
+      </select></label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label>Weather layer <select id="layer">
+        <option value="gust">Actual gusts</option>
+        <option value="gust_f1">Day-ahead forecast gusts</option>
+      </select></label>
+    </div>
+    <div class="scale"><span>20</span><div class="bar"></div><span>60+ km/h gusts</span></div>
+
+    <h2>Reliability (average of <span id="nreal"></span> simulated storms)</h2>
+    <table id="kpi"></table>
+    <p class="note">Pre-positioning sends idle crews toward the zones where forecast risk and customers are highest. Percentages show change vs crews staying put. SAIDI: outage minutes per customer. SAIFI: interruptions per customer. Lower is better. Dispatch only shortens outages, so SAIFI is the same for every rule.</p>
+
+    <h2>Customers without power</h2>
+    <div id="chartOut"></div>
+    <div class="legend" id="legendOut"></div>
+
+    <h2>Gusts across the area</h2>
+    <div id="chartWind"></div>
+    <div class="legend"><span><i style="background:var(--ink)"></i>actual (area max)</span><span><i style="background:var(--accent)"></i>day-ahead forecast (area max)</span></div>
+    <p class="note" id="wxnote"></p>
+
+    <h2>Rules</h2>
+    <p class="note"><b>First come</b>: oldest fault first. <b>Nearest</b>: closest fault first. <b>Priority</b>: highest (customers + critical-load bonus) ÷ (travel + repair time).</p>
+  </aside>
+</main>
+<footer>
+  <button id="play">Play</button>
+  <input id="slider" type="range" min="0" max="72" step="0.5" value="0">
+  <span id="clock"></span>
+  <span class="stat">Active faults <b id="nFaults">0</b></span>
+  <span class="stat">Customers out <b id="nOut">0</b></span>
+</footer>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="data.js"></script>
+<script>
+(function () {
+  const D = window.DATA;
+  const NAMES = { fifo: "First come", nearest: "Nearest", priority: "Priority" };
+  const COLORS = { fifo: "var(--c-fifo)", nearest: "var(--c-nearest)", priority: "var(--c-priority)" };
+  const $ = (id) => document.getElementById(id);
+  const fmt = (n) => Math.round(n).toLocaleString("en-IN");
+
+  const state = { crews: String(D.meta.default_crews), strategy: "priority", layer: "gust", mode: "depot", h: 0, playing: false };
+  const horizon = () => D.by_crews[state.crews].horizon;   // runs until the last fault is restored
+  const entry = () => D.by_crews[state.crews][state.mode];
+
+  // ---- map ----
+  const map = L.map("map", { zoomControl: true });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "&copy; OpenStreetMap contributors", maxZoom: 18, opacity: 0.85
+  }).addTo(map);
+  const lats = D.zones.map(z => z.lat), lons = D.zones.map(z => z.lon);
+  const bounds = [[Math.min(...lats) - 0.02, Math.min(...lons) - 0.02], [Math.max(...lats) + 0.02, Math.max(...lons) + 0.02]];
+  const fit = () => { map.invalidateSize(); map.fitBounds(bounds); };
+  fit();
+  window.addEventListener("load", fit);
+  window.addEventListener("resize", fit);
+
+  D.lines.forEach(pl => L.polyline(pl, { color: "#6b7280", weight: 1.2, opacity: 0.55 }).addTo(map));
+  D.substations.forEach(s => L.circleMarker(s, { radius: 2, color: "#374151", weight: 1, fillOpacity: 0.9 }).addTo(map));
+  D.depots.forEach((d, i) => L.marker(d, { icon: L.divIcon({ className: "", html: '<div style="width:14px;height:14px;background:#0f766e;border:2px solid #fff;border-radius:3px"></div>', iconSize: [14, 14] }) })
+    .bindTooltip("Crew depot " + (i + 1)).addTo(map));
+
+  const maxCust = Math.max(...D.zones.map(z => z.customers));
+  const zoneLayers = D.zones.map(z => {
+    const c = L.circleMarker([z.lat, z.lon], {
+      radius: 8 + 16 * Math.sqrt(z.customers / maxCust),
+      weight: z.critical ? 3 : 1, color: z.critical ? "#7c3aed" : "#374151", fillOpacity: 0.6
+    }).addTo(map);
+    return c;
+  });
+  const faultLayer = L.layerGroup().addTo(map);
+  const crewLayer = L.layerGroup().addTo(map);
+
+  // crew position at hour h: linear between waypoints [t, lat, lon]
+  function crewAt(tr, h) {
+    if (h <= tr[0][0]) return [tr[0][1], tr[0][2]];
+    for (let i = 1; i < tr.length; i++) {
+      if (h <= tr[i][0]) {
+        const a = tr[i - 1], b = tr[i], f = b[0] === a[0] ? 1 : (h - a[0]) / (b[0] - a[0]);
+        return [a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+      }
+    }
+    const l = tr[tr.length - 1];
+    return [l[1], l[2]];
+  }
+
+  function gustColor(g) {
+    const t = Math.max(0, Math.min(1, (g - 20) / 40));
+    const stops = [[253, 230, 138], [245, 158, 11], [185, 28, 28]];
+    const k = t * 2, i = Math.min(1, Math.floor(k)), f = k - i;
+    const c = stops[i].map((v, j) => Math.round(v + (stops[i + 1][j] - v) * f));
+    return "rgb(" + c.join(",") + ")";
+  }
+
+  // ---- charts ----
+  function lineChart(el, series, yMax, yLabel, H) {
+    const W = 360, Ht = 150, m = { l: 38, r: 8, t: 8, b: 20 };
+    const x = (h) => m.l + (W - m.l - m.r) * h / H;
+    const y = (v) => Ht - m.b - (Ht - m.t - m.b) * v / yMax;
+    let s = '<svg class="chart" viewBox="0 0 ' + W + " " + Ht + '">';
+    for (let i = 0; i <= 4; i++) {
+      const v = yMax * i / 4;
+      s += '<line x1="' + m.l + '" x2="' + (W - m.r) + '" y1="' + y(v) + '" y2="' + y(v) + '" stroke="var(--line)"/>';
+      s += '<text x="' + (m.l - 4) + '" y="' + (y(v) + 3) + '" text-anchor="end">' + (yMax >= 1000 ? Math.round(v / 1000) + "k" : Math.round(v)) + "</text>";
+    }
+    for (let d = 0; d <= H; d += (H > 120 ? 48 : 24)) {
+      s += '<text x="' + x(d) + '" y="' + (Ht - 5) + '" text-anchor="middle">' + (d === 0 ? "0h" : d + "h") + "</text>";
+    }
+    series.forEach(se => {
+      s += '<polyline fill="none" stroke-width="' + (se.w || 2) + '" stroke="' + se.color + '"' +
+        (se.dash ? ' stroke-dasharray="4 3" opacity="0.55"' : "") + ' points="' +
+        se.data.slice(0, H + 1).map((v, i) => x(i) + "," + y(v)).join(" ") + '"/>';
+    });
+    s += '<line class="cursor" y1="' + m.t + '" y2="' + (Ht - m.b) + '" stroke="var(--warn)" stroke-width="1.5"/>';
+    s += '<text x="' + (m.l - 4) + '" y="10" text-anchor="end" style="display:none">' + yLabel + "</text></svg>";
+    el.innerHTML = s;
+    const cur = el.querySelector(".cursor");
+    return (h) => { cur.setAttribute("x1", x(h)); cur.setAttribute("x2", x(h)); };
+  }
+
+  let moveOutCursor = () => {}, moveWindCursor = () => {};
+
+  function buildCharts() {
+    const H = horizon();
+    const E = D.by_crews[state.crews];
+    const st = E[state.mode].storm, stD = E.depot.storm;
+    const yMax = Math.max(...[st, stD].flatMap(x => Object.values(x).map(s => Math.max(...s.customers_out))), 1000);
+    const nice = Math.ceil(yMax / 50000) * 50000;
+    const series = [];
+    if (state.mode === "prepos") Object.keys(NAMES).forEach(k => series.push({ data: stD[k].customers_out, color: COLORS[k], dash: true, w: 1.5 }));
+    Object.keys(NAMES).forEach(k => series.push({ data: st[k].customers_out, color: COLORS[k] }));
+    moveOutCursor = lineChart($("chartOut"), series, nice, "", H);
+    $("legendOut").innerHTML = Object.keys(NAMES).map(k => '<span><i style="background:' + COLORS[k] + '"></i>' + NAMES[k] + "</span>").join("") +
+      (state.mode === "prepos" ? '<span>dashed = crews stay at depots</span>' : "");
+    const maxOf = (arr2d) => D.times.map((_, i) => Math.max(...arr2d.map(r => r[i])));
+    const act = maxOf(D.weather.gust), fc = maxOf(D.weather.gust_f1);
+    moveWindCursor = lineChart($("chartWind"), [
+      { data: act, color: "var(--ink)", w: 1.6 }, { data: fc, color: "var(--accent)", w: 1.6 }], 70, "km/h", H);
+    moveOutCursor(state.h); moveWindCursor(state.h);
+  }
+
+  function buildKpi() {
+    const E = D.by_crews[state.crews], sm = E[state.mode].summary, base = E.depot.summary;
+    const bestSaidi = Math.min(...Object.keys(NAMES).map(k => sm[k].saidi[0]));
+    let h = "<tr><th>Rule</th><th>SAIDI</th><th>SAIFI</th><th>Critical loads (h)</th><th>Travel (h)</th></tr>";
+    Object.keys(NAMES).forEach(k => {
+      const s = sm[k], d = (s.saidi[0] / base[k].saidi[0] - 1) * 100;
+      const delta = state.mode === "prepos" ? ' <span class="sd">(' + (d <= 0 ? "\u2212" : "+") + Math.abs(d).toFixed(1) + "%)</span>" : "";
+      h += '<tr class="' + (s.saidi[0] === bestSaidi ? "best" : "") + '"><td><span class="dot" style="background:' + COLORS[k] + '"></span>' + NAMES[k] + "</td>" +
+        "<td>" + fmt(s.saidi[0]) + ' <span class="sd">\u00b1' + fmt(s.saidi[1]) + "</span>" + delta + "</td>" +
+        "<td>" + s.saifi[0].toFixed(2) + "</td><td>" + s.crit_h[0].toFixed(1) + "</td><td>" + s.travel_h[0].toFixed(2) + "</td></tr>";
+    });
+    $("kpi").innerHTML = h;
+  }
+
+  // ---- render at time h ----
+  function render() {
+    const h = state.h, hi = Math.min(D.times.length - 1, Math.floor(h));
+    $("clock").textContent = D.times[hi].replace("T", " ") + (h % 1 ? " +30m" : "");
+    zoneLayers.forEach((c, i) => {
+      const z = D.zones[i], g = D.weather[state.layer][z.grid][hi], r = D.weather.rain[z.grid][hi];
+      c.setStyle({ fillColor: gustColor(g) });
+      c.bindTooltip("<b>" + (z.critical ? "Critical-load zone · " : "Zone · ") + fmt(z.customers) + " customers</b><br>" +
+        z.substations + " substations<br>Gust " + g.toFixed(0) + " km/h · rain " + r.toFixed(1) + " mm/h");
+    });
+    faultLayer.clearLayers();
+    const storm = entry().storm[state.strategy], rest = storm.restore;
+    let nF = 0, nOut = 0;
+    D.faults.forEach((f, i) => {
+      if (f.t <= h && rest[i] > h) {
+        nF++; nOut += f.customers;
+        const jitter = ((i * 37) % 11 - 5) * 0.0009;
+        L.marker([f.lat + jitter, f.lon - jitter], {
+          icon: L.divIcon({ className: "", html: '<div class="fault-pin' + (f.critical ? " crit" : "") + '"></div>', iconSize: [14, 14] })
+        }).bindTooltip("Fault since " + f.t.toFixed(1) + " h · " + fmt(f.customers) + " customers · restored at " + rest[i].toFixed(1) + " h" + (f.critical ? " · critical load" : "")).addTo(faultLayer);
+      }
+    });
+    crewLayer.clearLayers();
+    storm.tracks.forEach((tr, k) => {
+      const p = crewAt(tr, h);
+      L.circleMarker(p, { radius: 7, color: "#fff", weight: 2, fillColor: "#2563eb", fillOpacity: 1 })
+        .bindTooltip("Crew " + (k + 1)).addTo(crewLayer);
+    });
+    $("nFaults").textContent = nF; $("nOut").textContent = fmt(nOut);
+    $("slider").value = h;
+    moveOutCursor(h); moveWindCursor(h);
+  }
+
+  // ---- controls ----
+  $("crews").innerHTML = D.meta.crew_options.map(c => '<option value="' + c + '">' + c + "</option>").join("");
+  $("crews").value = state.crews;
+  $("strategy").innerHTML = Object.keys(NAMES).map(k => '<option value="' + k + '">' + NAMES[k] + "</option>").join("");
+  $("strategy").value = state.strategy;
+  $("nreal").textContent = D.meta.realizations;
+  const gm = Math.max(...D.weather.gust.flat()), fm = Math.max(...D.weather.gust_f1.flat());
+  $("wxnote").textContent = "Peak gust " + gm.toFixed(0) + " km/h actual vs " + fm.toFixed(0) + " km/h forecast a day ahead. The forecast under-predicts wind, which matters for any pre-positioning plan.";
+
+  $("crews").onchange = (e) => { state.crews = e.target.value; state.h = Math.min(state.h, horizon()); $("slider").max = horizon(); buildKpi(); buildCharts(); render(); };
+  $("strategy").onchange = (e) => { state.strategy = e.target.value; render(); };
+  $("mode").onchange = (e) => { state.mode = e.target.value; buildKpi(); buildCharts(); render(); };
+  $("layer").onchange = (e) => { state.layer = e.target.value; render(); };
+  $("slider").oninput = (e) => { state.h = parseFloat(e.target.value); render(); };
+  $("play").onclick = () => {
+    state.playing = !state.playing;
+    $("play").textContent = state.playing ? "Pause" : "Play";
+    if (state.playing && state.h >= horizon()) state.h = 0;
+  };
+  setInterval(() => {
+    if (!state.playing) return;
+    state.h = Math.min(horizon(), state.h + 0.5);
+    if (state.h >= horizon()) { state.playing = false; $("play").textContent = "Play"; }
+    render();
+  }, 150);
+
+  $("slider").max = horizon();
+  buildKpi(); buildCharts(); render();
+})();
+</script>
+</body>
+</html>
